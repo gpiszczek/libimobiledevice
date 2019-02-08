@@ -37,6 +37,7 @@
 #include <libimobiledevice/screenshotr.h>
 
 static int alarm_pipe[2];
+static volatile int stop_running = 0;
 
 static int set_signal_handler(int sig, void (*handler)(int))
 {
@@ -54,6 +55,11 @@ void sigalarm_handler(int sig)
 		write(2, msg, sizeof(msg)-1);
 		abort();
 	}
+}
+
+void sigint_handler(int sig)
+{
+	stop_running = 1;
 }
 
 void print_usage(int argc, char **argv);
@@ -166,6 +172,11 @@ int main(int argc, char **argv)
 					return -1;
 				}
 
+				if (set_signal_handler(SIGINT, sigint_handler) != 0) {
+					perror("sigaction");
+					return -1;
+				}
+
 				long delay = 1000000 / rate;
 				struct itimerval it = { { 0, delay }, { 0, delay } };
 				if (setitimer(ITIMER_REAL, &it, 0) != 0) {
@@ -177,7 +188,7 @@ int main(int argc, char **argv)
 				memset(final_filename, 0, 256);
 			}
 
-			for (;;) {
+			while (!stop_running) {
 				// wait for next frame
 				if (rate) {
 					for (;;) {
