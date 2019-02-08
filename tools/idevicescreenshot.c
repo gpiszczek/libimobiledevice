@@ -272,7 +272,7 @@ void print_usage(int argc, char **argv)
 	printf("  -d, --debug\t\tenable communication debugging\n");
 	printf("  -u, --udid UDID\ttarget specific device by UDID\n");
 	printf("  -r, --rate fps\ttake screenshots at specified frame rate (should by used with --join or filname with %%d printf format specifier)\n");
-	printf("  -p, --join\tsave screen series joined in single file, suitable for ffmpeg *_pipe inputs\n");
+	printf("  -p, --join\t\tsave screen series joined in single file, suitable for ffmpeg *_pipe inputs\n");
 	printf("  -e, --ext\t\tappend extension based on image type to specified filename (default behaviour when not using --rate)\n");
 	printf("  -h, --help\t\tprints usage information\n");
 	printf("\n");
