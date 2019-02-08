@@ -26,12 +26,35 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <signal.h>
 #include <errno.h>
 #include <time.h>
+#include <unistd.h>
+#include <sys/time.h>
 
 #include <libimobiledevice/libimobiledevice.h>
 #include <libimobiledevice/lockdown.h>
 #include <libimobiledevice/screenshotr.h>
+
+static int alarm_pipe[2];
+
+static int set_signal_handler(int sig, void (*handler)(int))
+{
+	struct sigaction sa;
+	sa.sa_handler = handler;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = 0;
+	return sigaction(sig, &sa, NULL);
+}
+
+void sigalarm_handler(int sig)
+{
+	if (write(alarm_pipe[1], "", 1) != 1) {
+		char msg[] = "write: failed from sigalarm_handler\n";
+		write(2, msg, sizeof(msg)-1);
+		abort();
+	}
+}
 
 void print_usage(int argc, char **argv);
 
@@ -44,6 +67,9 @@ int main(int argc, char **argv)
 	lockdownd_service_descriptor_t service = NULL;
 	int result = -1;
 	int i;
+	int rate = 0;
+	int append_ext = 0;
+	int join = 0;
 	const char *udid = NULL;
 	char *filename = NULL;
 
@@ -60,6 +86,23 @@ int main(int argc, char **argv)
 				return 0;
 			}
 			udid = argv[i];
+			continue;
+		}
+		else if (!strcmp(argv[i], "-r") || !strcmp(argv[i], "--rate")) {
+			i++;
+			if (!argv[i] || !*argv[i] || !atoi(argv[i])) {
+				print_usage(argc, argv);
+				return 0;
+			}
+			rate = atoi(argv[i]);
+			continue;
+		}
+		if (!strcmp(argv[i], "-e") || !strcmp(argv[i], "--ext")) {
+			append_ext = 1;
+			continue;
+		}
+		if (!strcmp(argv[i], "-j") || !strcmp(argv[i], "--join")) {
+			join = 1;
 			continue;
 		}
 		else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
@@ -97,39 +140,97 @@ int main(int argc, char **argv)
 		if (screenshotr_client_new(device, service, &shotr) != SCREENSHOTR_E_SUCCESS) {
 			printf("Could not connect to screenshotr!\n");
 		} else {
+			//struct timeval tv;
+			char *final_filename = NULL;
 			char *imgdata = NULL;
+			char c;
 			uint64_t imgsize = 0;
-			if (screenshotr_take_screenshot(shotr, &imgdata, &imgsize) == SCREENSHOTR_E_SUCCESS) {
-				if (!filename) {
-					const char *fileext = NULL;
-					if (memcmp(imgdata, "\x89PNG", 4) == 0) {
-						fileext = ".png";
-					} else if (memcmp(imgdata, "MM\x00*", 4) == 0) {
-						fileext = ".tiff";
-					} else {
-						printf("WARNING: screenshot data has unexpected image format.\n");
-						fileext = ".dat";
-					}
-					time_t now = time(NULL);
-					filename = (char*)malloc(36);
-					size_t pos = strftime(filename, 36, "screenshot-%Y-%m-%d-%H-%M-%S", gmtime(&now));
-					sprintf(filename+pos, "%s", fileext);
-				}
-				FILE *f = fopen(filename, "wb");
-				if (f) {
-					if (fwrite(imgdata, 1, (size_t)imgsize, f) == (size_t)imgsize) {
-						printf("Screenshot saved to %s\n", filename);
-						result = 0;
-					} else {
-						printf("Could not save screenshot to file %s!\n", filename);
-					}
-					fclose(f);
-				} else {
-					printf("Could not open %s for writing: %s\n", filename, strerror(errno));
-				}
-			} else {
-				printf("Could not get screenshot!\n");
+			int frame_no = 0;
+			FILE *f = NULL;
+
+			if (!filename) {
+				time_t now = time(NULL);
+				filename = (char*)malloc(36);
+				strftime(filename, 36, "screenshot-%Y-%m-%d-%H-%M-%S", gmtime(&now));
+				append_ext = 1;
 			}
+
+			if (rate) {
+				if (pipe(alarm_pipe) != 0) {
+					perror("pipe");
+					return -1;
+				}
+
+				if (set_signal_handler(SIGALRM, sigalarm_handler) != 0) {
+					perror("sigaction");
+					return -1;
+				}
+
+				long delay = 1000000 / rate;
+				struct itimerval it = { { 0, delay }, { 0, delay } };
+				if (setitimer(ITIMER_REAL, &it, 0) != 0) {
+					perror("setitimer");
+					return -1;
+				}
+
+				final_filename = (char *)malloc(256);
+				memset(final_filename, 0, 256);
+			}
+
+			for (;;) {
+				// wait for next frame
+				if (rate) {
+					for (;;) {
+						ssize_t alarm_pipe_read_result = read(alarm_pipe[0], &c, 1);
+						if ((alarm_pipe_read_result < 0) && (errno == EINTR)) continue;
+						//assert(alarm_pipe_read_result == 1);
+						break;
+					}
+				}
+				if (screenshotr_take_screenshot(shotr, &imgdata, &imgsize) == SCREENSHOTR_E_SUCCESS) {
+					if (append_ext) {
+						const char *fileext = NULL;
+						if (memcmp(imgdata, "\x89PNG", 4) == 0) {
+							fileext = ".png";
+						} else if (memcmp(imgdata, "MM\x00*", 4) == 0) {
+							fileext = ".tiff";
+						} else {
+							printf("WARNING: screenshot data has unexpected image format.\n");
+							fileext = ".dat";
+						}
+						strcat(filename, fileext);
+						// do it for first (maybe only) image
+						append_ext = 0;
+					}
+					if (rate) {
+						snprintf(final_filename, 256, filename, frame_no++);
+					} else {
+						final_filename = filename;
+					}
+					if (!join || !f) {
+						f = fopen(final_filename, "wb");
+					}
+					if (f) {
+						if (fwrite(imgdata, 1, (size_t)imgsize, f) == (size_t)imgsize) {
+							if (!rate) printf("Screenshot saved to %s\n", final_filename);
+							result = 0;
+						} else {
+							printf("Could not save screenshot to file %s!\n", final_filename);
+							break;
+						}
+						if (!join) fclose(f);
+					} else {
+						printf("Could not open %s for writing: %s\n", final_filename, strerror(errno));
+						break;
+					}
+				} else {
+					printf("Could not get screenshot!\n");
+					break;
+				}
+				// finish after first iteration if rate not specified
+				if (!rate) break;
+			}
+			if (join && f) fclose(f);
 			screenshotr_client_free(shotr);
 		}
 	} else {
@@ -159,6 +260,9 @@ void print_usage(int argc, char **argv)
 	printf("the screenshotr service is not available.\n\n");
 	printf("  -d, --debug\t\tenable communication debugging\n");
 	printf("  -u, --udid UDID\ttarget specific device by UDID\n");
+	printf("  -r, --rate fps\ttake screenshots at specified frame rate (should by used with --join or filname with %%d printf format specifier)\n");
+	printf("  -p, --join\tsave screen series joined in single file, suitable for ffmpeg *_pipe inputs\n");
+	printf("  -e, --ext\t\tappend extension based on image type to specified filename (default behaviour when not using --rate)\n");
 	printf("  -h, --help\t\tprints usage information\n");
 	printf("\n");
 	printf("Homepage: <" PACKAGE_URL ">\n");
