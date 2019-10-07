@@ -28,6 +28,9 @@
 #include <string.h>
 #include <stdlib.h>
 #include <getopt.h>
+#ifndef WIN32
+#include <signal.h>
+#endif
 #include "common/userpref.h"
 
 #include <libimobiledevice/libimobiledevice.h>
@@ -41,6 +44,7 @@ static void print_error_message(lockdownd_error_t err)
 		case LOCKDOWN_E_PASSWORD_PROTECTED:
 			printf("ERROR: Could not validate with device %s because a passcode is set. Please enter the passcode on the device and retry.\n", udid);
 			break;
+		case LOCKDOWN_E_INVALID_CONF:
 		case LOCKDOWN_E_INVALID_HOST_ID:
 			printf("ERROR: Device %s is not paired with this host\n", udid);
 			break;
@@ -133,6 +137,9 @@ int main(int argc, char **argv)
 	} op_t;
 	op_t op = OP_NONE;
 
+#ifndef WIN32
+	signal(SIGPIPE, SIG_IGN);
+#endif
 	parse_opts(argc, argv);
 
 	if ((argc - optind) < 1) {
@@ -191,12 +198,13 @@ int main(int argc, char **argv)
 
 	if (udid) {
 		ret = idevice_new(&device, udid);
-		free(udid);
-		udid = NULL;
 		if (ret != IDEVICE_E_SUCCESS) {
 			printf("No device found with udid %s, is it plugged in?\n", udid);
+			free(udid);
 			return EXIT_FAILURE;
 		}
+		free(udid);
+		udid = NULL;
 	} else {
 		ret = idevice_new(&device, NULL);
 		if (ret != IDEVICE_E_SUCCESS) {
