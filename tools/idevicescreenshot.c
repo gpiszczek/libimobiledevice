@@ -241,7 +241,8 @@ int main(int argc, char **argv)
 					}
 				} else {
 					printf("Could not get screenshot!\n");
-					break;
+					// don't break on screenshot error, just got it
+					// break;
 				}
 				// finish after first iteration if rate not specified
 				if (!rate) break;
