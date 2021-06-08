@@ -43,29 +43,11 @@
 static int alarm_pipe[2];
 static volatile int stop_running = 0;
 
-static int set_signal_handler(int sig, void (*handler)(int))
-{
-	struct sigaction sa;
-	sa.sa_handler = handler;
-	sigemptyset(&sa.sa_mask);
-	sa.sa_flags = 0;
-	return sigaction(sig, &sa, NULL);
-}
+static int set_signal_handler(int sig, void (*handler)(int));
+void sigalarm_handler(int sig);
+void sigint_handler(int sig);
 
-void sigalarm_handler(int sig)
-{
-	if (write(alarm_pipe[1], "", 1) != 1) {
-		char msg[] = "write: failed from sigalarm_handler\n";
-		write(2, msg, sizeof(msg)-1);
-		abort();
-	}
-}
-
-void sigint_handler(int sig)
-{
-	stop_running = 1;
-}
-
+void get_image_filename(char *imgdata, char **filename);
 void print_usage(int argc, char **argv);
 
 int main(int argc, char **argv)
@@ -78,7 +60,6 @@ int main(int argc, char **argv)
 	int result = -1;
 	int i;
 	int rate = 0;
-	int append_ext = 0;
 	int join = 0;
 	const char *udid = NULL;
 	int use_network = 0;
@@ -113,10 +94,6 @@ int main(int argc, char **argv)
 				return 0;
 			}
 			rate = atoi(argv[i]);
-			continue;
-		}
-		else if (!strcmp(argv[i], "-e") || !strcmp(argv[i], "--ext")) {
-			append_ext = 1;
 			continue;
 		}
 		else if (!strcmp(argv[i], "-j") || !strcmp(argv[i], "--join")) {
@@ -170,13 +147,6 @@ int main(int argc, char **argv)
 			int frame_no = 0;
 			FILE *f = NULL;
 
-			if (!filename) {
-				time_t now = time(NULL);
-				filename = (char*)malloc(36);
-				strftime(filename, 36, "screenshot-%Y-%m-%d-%H-%M-%S", gmtime(&now));
-				append_ext = 1;
-			}
-
 			if (rate) {
 				if (pipe(alarm_pipe) != 0) {
 					perror("pipe");
@@ -215,19 +185,12 @@ int main(int argc, char **argv)
 					}
 				}
 				if (screenshotr_take_screenshot(shotr, &imgdata, &imgsize) == SCREENSHOTR_E_SUCCESS) {
-					if (append_ext) {
-						const char *fileext = NULL;
-						if (memcmp(imgdata, "\x89PNG", 4) == 0) {
-							fileext = ".png";
-						} else if (memcmp(imgdata, "MM\x00*", 4) == 0) {
-							fileext = ".tiff";
-						} else {
-							printf("WARNING: screenshot data has unexpected image format.\n");
-							fileext = ".dat";
+					if (!filename) {
+						get_image_filename(imgdata, &filename);
+						if (!filename) {
+							printf("FATAL: Could not find a unique filename!\n");
+							break;
 						}
-						strcat(filename, fileext);
-						// do it for first (maybe only) image
-						append_ext = 0;
 					}
 					if (rate) {
 						snprintf(final_filename, 256, filename, frame_no++);
@@ -251,9 +214,8 @@ int main(int argc, char **argv)
 						break;
 					}
 				} else {
+					// don't break on screenshot error, just log it
 					printf("Could not get screenshot!\n");
-					// don't break on screenshot error, just got it
-					// break;
 				}
 				// finish after first iteration if rate not specified
 				if (!rate) break;
@@ -274,6 +236,81 @@ int main(int argc, char **argv)
 	return result;
 }
 
+static int set_signal_handler(int sig, void (*handler)(int))
+{
+	struct sigaction sa;
+	sa.sa_handler = handler;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = 0;
+	return sigaction(sig, &sa, NULL);
+}
+
+void sigalarm_handler(int sig)
+{
+	if (write(alarm_pipe[1], "", 1) != 1) {
+		char msg[] = "write: failed from sigalarm_handler\n";
+		write(2, msg, sizeof(msg)-1);
+		abort();
+	}
+}
+
+void sigint_handler(int sig)
+{
+	stop_running = 1;
+}
+
+void get_image_filename(char *imgdata, char **filename)
+{
+	// If the provided filename already has an extension, use it as is.
+	if (*filename) {
+		char *last_dot = strrchr(*filename, '.');
+		if (last_dot && !strchr(last_dot, '/')) {
+			return;
+		}
+	}
+
+	// Find the appropriate file extension for the filename.
+	const char *fileext = NULL;
+	if (memcmp(imgdata, "\x89PNG", 4) == 0) {
+		fileext = ".png";
+	} else if (memcmp(imgdata, "MM\x00*", 4) == 0) {
+		fileext = ".tiff";
+	} else {
+		printf("WARNING: screenshot data has unexpected image format.\n");
+		fileext = ".dat";
+	}
+
+	// If a filename without an extension is provided, append the extension.
+	// Otherwise, generate a filename based on the current time.
+	char *basename = NULL;
+	if (*filename) {
+		basename = (char*)malloc(strlen(*filename) + 1);
+		strcpy(basename, *filename);
+		free(*filename);
+		*filename = NULL;
+	} else {
+		time_t now = time(NULL);
+		basename = (char*)malloc(32);
+		strftime(basename, 31, "screenshot-%Y-%m-%d-%H-%M-%S", gmtime(&now));
+	}
+
+	// Ensure the filename is unique on disk.
+	char *unique_filename = (char*)malloc(strlen(basename) + strlen(fileext) + 7);
+	sprintf(unique_filename, "%s%s", basename, fileext);
+	int i;
+	for (i = 2; i < (1 << 16); i++) {
+		if (access(unique_filename, F_OK) == -1) {
+			*filename = unique_filename;
+			break;
+		}
+		sprintf(unique_filename, "%s-%d%s", basename, i, fileext);
+	}
+	if (!*filename) {
+		free(unique_filename);
+	}
+	free(basename);
+}
+
 void print_usage(int argc, char **argv)
 {
 	char *name = NULL;
@@ -281,10 +318,13 @@ void print_usage(int argc, char **argv)
 	name = strrchr(argv[0], '/');
 	printf("Usage: %s [OPTIONS] [FILE]\n", (name ? name + 1: argv[0]));
 	printf("\n");
-	printf("Gets a screenshot from a device.\n");
+	printf("Gets a screenshot from a connected device.\n");
 	printf("\n");
-	printf("The screenshot is saved as a TIFF image with the given FILE name,\n");
-	printf("where the default name is \"screenshot-DATE.tiff\", e.g.:\n");
+	printf("The image is in PNG format for iOS 9+ and otherwise in TIFF format.\n");
+	printf("The screenshot is saved as an image with the given FILE name.\n");
+	printf("If FILE has no extension, FILE will be a prefix of the saved filename.\n");
+	printf("If FILE is not specified, \"screenshot-DATE\", will be used as a prefix\n");
+	printf("of the filename, e.g.:\n");
 	printf("   ./screenshot-2013-12-31-23-59-59.tiff\n");
 	printf("\n");
 	printf("NOTE: A mounted developer disk image is required on the device, otherwise\n");
@@ -295,7 +335,6 @@ void print_usage(int argc, char **argv)
 	printf("  -d, --debug\t\tenable communication debugging\n");
 	printf("  -r, --rate fps\ttake screenshots at specified frame rate (should by used with --join or filname with %%d printf format specifier)\n");
 	printf("  -j, --join\t\tsave screen series joined in single file, suitable for ffmpeg *_pipe inputs\n");
-	printf("  -e, --ext\t\tappend extension based on image type to specified filename (default behaviour when not using --rate)\n");
 	printf("  -h, --help\t\tprints usage information\n");
 	printf("  -v, --version\t\tprints version information\n");
 	printf("\n");
